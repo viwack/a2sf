@@ -12,7 +12,7 @@ library(ggplot2)
 library(leaflet)
 library(sf)
 library(tidygeocoder)
-
+library(lubridate)
 ```
 # Understanding Ann Arbor Summer Festival Visitors, Post-, In- and Combined- Survey Results
 ```{r, echo=FALSE, warning= FALSE, message= FALSE}
