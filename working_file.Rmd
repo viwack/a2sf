@@ -1,0 +1,404 @@
+---
+title: "A2Sf Visitor Survey Analysis"
+author: "Vicky Wang"
+output: html_document
+---
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+library(dplyr)
+library(zipcodeR)
+library(usdata)
+library(knitr)
+library(ggplot2)
+library(leaflet)
+library(sf)
+library(tidygeocoder)
+library(lubridate)
+library(tigris)
+library(leaflet.extras)
+library(htmlwidgets)
+```
+# Understanding Ann Arbor Summer Festival Visitors, Post-, In- and Combined- Survey Results
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+in_season <- readxl::read_xlsx("In Season A2SF Survey data.xlsx")
+post_season <- readxl::read_xlsx("Post Season A2SF Survey data.xlsx")
+```
+## Post-Season Survey Data
+*The A2SF post-season survey was disseminated via Instagram, email, _________________(?). This led to bot responses, despite CAPTCHA use. The following code attempts to identify and filter those responses out prior to completing more in-depth analysis, but those data can be easily re-incorporated as needed.*
+
+1. Remove non-US auto-collected countries and manual zip code entries that are not 5 characters
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+post_season_clean <- post_season %>%
+  filter(nchar(`What is your zip code?`) == 5) %>%
+  filter(`Country Code` == "US") 
+# initial clean limits zip code entries to 5 digits and countries to the US. non-US entries double-checked via free response quality and readability
+```
+
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+post_season_clean$`What is your zip code?` <- as.character(post_season_clean$`What is your zip code?`)
+# turns zip code column into character to be analyzed using zipR
+
+is_bot <- function(zip, state) {
+  # Handle potential NAs or invalid ZIPs
+  if (is.na(zip) || nchar(zip) != 5 || !grepl("^[0-9]+$", zip)) {
+    return(TRUE)  # If ZIP code is NA, not 5 characters, or not numeric
+  }
+  
+  # Get state info from ZIP code
+  zip_info <- zipcodeR::reverse_zipcode(zip)
+  
+  # Handle if the lookup fails
+  if (is.null(zip_info) || nrow(zip_info) == 0) {
+    return(TRUE)  # If ZIP code info is not found
+  }
+  state <- state2abbr(toupper(state))
+  # Check if the provided state matches the ZIP code state
+  zip_state <- zip_info$state
+  return(zip_state != state)
+}
+#function to handle abnormal zip-state matchups, marking those not equal as FALSE
+
+```
+
+2. Create a new column that determines initial Bot/Not Bot status by comparing auto-collected Country with manual-collected Zip Code
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+elim_bots <- post_season_clean %>%
+  mutate(Bot = case_when(
+    mapply(is_bot, `What is your zip code?`, State) ~ "Bot",
+    TRUE ~ "Not Bot"
+  )) %>%
+  filter(Bot == "Not Bot")
+# created new column that checks whether the zip code inputted and state auto-collected match and labeled seeming Bots accordingly. then filtered on "Not Bots"
+
+elim_bots %>%
+  select(`Respondent ID`, State, `Country Code`, Bot) %>%
+  head() %>%
+  kable()
+
+elim_bots <- elim_bots %>%
+  mutate(`Start Date` = as.POSIXct(`Start Date`, format = "%Y-%m-%d %H:%M:%S")) %>%
+  mutate(EndDate = as.POSIXct(EndDate, format = "%Y-%m-%d %H:%M:%S")) %>%
+  mutate(duration = difftime(EndDate, `Start Date`, units = "secs"))
+# no duration is egregiously short to suggest bot presence
+```
+3. Checked for unusually short-duration surveys based on Start and End Date data. 0 Identified.
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+boxplot(elim_bots$duration)
+
+```
+
+4. Created a new file after manually reading responses. Flagged previous "Not Bot"s as "Maybe". Also filtered to leave only "Not Bot" remaining.
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+maybe_bots <- read.csv("manually_maybed.csv")
+# manually viewed xcel responses to change "Not Bot" to "Maybe" (bot)
+```
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+hopefully_notbot <- maybe_bots %>%
+  filter(Bot == "Not Bot") # removed maybe bots for analysis
+```
+
+
+## **Where are People From?**
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+hopefully_notbot$zip_char <- as.character(hopefully_notbot$What.is.your.zip.code.)
+
+zip_codes <- hopefully_notbot %>%
+  group_by(zip_char) %>%
+  summarise(count = n()) %>%
+  mutate(zip_group = case_when(
+    zip_char == "48103" ~ "48103",
+    zip_char == "48104" ~ "48104",
+    zip_char == "48105" ~ "48105",
+    zip_char == "48108" ~ "48108",
+    zip_char == "48130" ~ "48130",
+    zip_char == "48176" ~ "48176",
+    zip_char == "48197" ~ "48197",
+    zip_char == "48198" ~ "48198",
+    zip_char == "48221" ~ "48221",
+    TRUE ~ "Other"
+  )) %>%
+  group_by(zip_group) %>%
+  summarise(count = sum(count)) %>%
+  ungroup()
+```
+I collapsed all zip code counts of 1 into a single "Other" categorization.
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+zip_codes <- zip_codes %>%
+  mutate(
+    fraction = count / sum(count),
+    ymax = cumsum(fraction),
+    ymin = c(0, head(ymax, n = -1)),
+    labelPosition = (ymax + ymin) / 2
+    )
+
+# Plot
+ggplot(zip_codes, aes(ymax = ymax, ymin = ymin, xmax = 4, xmin = 3, fill = zip_group)) +
+  geom_rect(color="black") +
+  geom_text(x = 4.2, aes(y = labelPosition, label = zip_group), size = 2) + # Position labels outside
+  geom_segment(aes(x = 4, xend = 4, y = labelPosition, yend = labelPosition), color = "black") + # Add line from pie to label
+  coord_polar(theta = "y") +
+  ggtitle("A2SF Visitors by Zip Code") +
+  scale_fill_brewer(palette = "PuRd") +
+  theme_void() +
+  theme(legend.position = "none")
+```
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+geo_zip <- hopefully_notbot %>%
+  group_by(zip_char) %>%
+  summarise(count = n()) %>%
+  mutate(country = rep("USA", 26))
+```
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+fix_latlon <- read.csv("geocoded_data.csv")
+```
+I had to manually geocode some components of latitude and longitude based on zip code because the geocode() function is not perfect. This allows me to map the zip code regions.
+
+## Mapping Where A2SF Visitors are from
+* Note that I found 2 additional zip codes that are invalid according to [Free Map Tools](https://www.freemaptools.com/convert-us-zip-code-to-lat-lng.htm).
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+leaflet() %>%
+  addTiles() %>%  # Add default OpenStreetMap map tiles
+  setView(lng = -83.7430, lat = 42.2808, zoom = 8) %>%
+  addCircleMarkers(
+    data = fix_latlon,
+    lat = ~latitude,
+    lng = ~longitude,
+    radius = ~sqrt(count) * 2,  # Adjust the radius based on count
+    color = "blue",
+    fillColor = "blue",
+    fillOpacity = 0.5,
+    popup = ~paste("Zip Code:", zip_char, "<br/>", "Count:", count)
+  )
+
+```
+
+
+
+## Processing ALL ENTRIES TOGETHER
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+in_season <- in_season %>%
+  mutate(source = "In Season")
+
+post_season <- post_season %>%
+  mutate(source = "Post Season")
+
+raw_all_data <- bind_rows(in_season, post_season)
+```
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+first_clean_all <- raw_all_data %>%
+  select(`Respondent ID`,
+         source,
+         everything()
+         )
+```
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+combined <- read.csv("combined_all_raw.csv")
+```
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+combined <- combined %>%
+  rename(ID = Respondent.ID,
+         survey = source,
+         start_date = Start.Date,
+         end_date = EndDate,
+         country_code = Country.Code,
+         country = Country.Name,
+         state = State,
+         zip_code = What.is.your.zip.code.,
+         age = What.is.your.age.,
+         gender = With.what.gender.do.you.most.identify.,
+         other_gender_identity = Gender.Identity.Other,
+         edu = What.is.your.education.level.,
+         race_ethnicity = Which.of.the.following.describes.your.race.and.or.ethnicity..Note..we.recognize.the.following.list.is.not.all.encompassing.for.how.people.may.identify..Please.select.all.that.apply..and.in.addition..you.may.further.self.describe.race.and.or.ethnicity.using.the..Other..option...,
+         other_race_ethnicity = Race_Ethnicity.Other,
+         household_income = What.was.your.gross.household.income.during.the.last.year.,
+         attendance = How.many.times.each.year.do.you.typically.attend.Top.of.the.Park.,
+         attendance_factors_tn = What.were.the.biggest.factors.that.influenced.your.decision.whether.or.not.to.attend..Select.all.that.apply.,
+         other_favorite_offerings_tn = Favorite.Offerings.Other,
+         spend = On.average..how.much.money.do.you.spend.at.Top.of.the.Park.each.year..drinks..food..merchandise..etc...,
+         donation = A2SF.is.an.independent..community.supported.501.c.3.nonprofit.organization..with.individual.donors.contributing..340.000.or.20..of.our.yearly.budget..How.likely.are.you.to.donate.to.our.organization.,
+         future_attendance_likelihood = On.a.scale.of.1.10..how.likely.are.you.to.attend.one.of.our.events.in.the.future.,
+         recommend_likelihood = On.a.scale.of.1.10..how.likely.are.you.to.recommend.our.events.to.a.friend.or.family.member.,
+         family_offerings_satisfaction = On.a.scale.of.1.10..how.satisfied.are.you.with.family.offerings..KidZone..Kids.Rock..at.Top.of.the.Park., 
+         music_satisfaction = On.a.scale.of.1.10..how.satisfied.are.you.with.the.Top.of.the.Park.music.programming.,
+         overall_trajectory = On.a.scale.of.1.10..how.do.you.feel.about.the.overall.trajectory.that.A2SF.is.heading.in.,
+         anything_else = Is.there.anything.else.you.would.like.to.share.about.Top.of.the.Park.or.A2SF.as.an.organization.,
+         accessibility = What.would.make.it.easier.for.you.to.participate.in.A2SF.events.,
+         how_did_you_hear = How.did.you.hear.about.A2SF.at.Top.of.the.Park.,
+         email = If.you.would.like.to.be.entered.to.win.a..50.gift.card..please.provide.your.email.address.,
+         mailing_list = If.you.provided.your.email..do.you.want.to.be.added.to.our.mailing.list.,
+         attendance_post = How.many.times.DID.you.attend.Top.of.the.Park.this.season.,
+         offerings_post = What.WERE.your.favorite.offerings.this.season...Choose.up.to.three.,
+         spent = On.average..how.much.money.DID.you.spend.at.Top.of.the.Park.this.season..drinks..food..merchandise..etc...,
+         all_attendance = Times.Attended..IGNORE.SOURCE.,
+         all_fav_offerings = Favorite.Offerings..IGNORE.SOURCE.,
+         all_money_spent = Money.Spent..IGNORE.SOURCE.)
+```
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+combined <- combined %>%
+  rename(other_attendance_factors = Attendance.Other,
+         favorite_offerings_tn = What.are.your.favorite.offerings.tonight...Choose.up.to.three.)
+```
+
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+zc_metadata_df <- reverse_zipcode(combined$zip_code)
+
+remove_incorrect_state_zip <- combined %>%
+  left_join(zc_metadata_df, by = c("zip_code" = "zipcode")) %>%
+  mutate(state_abbreviation = state2abbr(state.x)) %>%
+  filter(state.y == state_abbreviation | country_code != "US")
+
+remove_incorrect_state_zip <- remove_incorrect_state_zip %>%
+  filter(country_code == "US")
+```
+
+"How many Superior Township and Ypsi/Township, Ann Arbor, Washtenaw County, outside Washtenaw, out of state?"
+* Cannot determine townships because zip codes don't generally match up with city or town boundaries. The best I can do is match zip code information with the "Major city" in each region. Can definitely do counties and out of state though.
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+remove_incorrect_state_zip <- remove_incorrect_state_zip %>%
+  group_by(zip_code) %>%
+  mutate(zip_count = n())
+```
+
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+
+leaflet() %>%
+  addTiles() %>%  # Add default OpenStreetMap map tiles
+  setView(lng = -83.7430, lat = 42.2808, zoom = 4) %>%
+  addCircleMarkers(
+    data = remove_incorrect_state_zip,
+    lat = ~lat,
+    lng = ~lng,
+    radius = ~sqrt(zip_count) * 2,  # Adjust the radius based on count
+    color = "blue",
+    fillColor = "blue",
+    fillOpacity = 0.5,
+    popup = ~paste("Zip Code:", zip_code, "<br/>", "Count:", zip_count)
+  )
+```
+
+
+
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+counties <- counties(cb = TRUE, resolution = "20m")
+cities <- places(cb = TRUE)
+
+counties <- st_transform(counties, crs = 4326)
+cities <- st_transform(cities, crs = 4326)
+
+```
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+leaflet() %>%
+  addTiles() %>%
+  setView(lng = -83.7430, lat = 42.2808, zoom = 8) %>%
+  addPolygons(data = counties,
+              weight = 1,
+              color = "#66c2a5",
+              fill = TRUE,
+              fillOpacity = 0.3,
+              group = "Counties",
+              highlightOptions = highlightOptions(
+                weight = 3,
+                color = "#1b7837",
+                fillOpacity = 0.5,
+                bringToFront = FALSE
+              )) %>%
+  addPolygons(data = cities,
+              weight = 1,
+              color = "#8da0cb",
+              fill = TRUE,
+              fillOpacity = 0.2,
+              group = "Cities",
+              highlightOptions = highlightOptions(
+                weight = 3,
+                color = "#225ea8",
+                fillOpacity = 0.5,
+                bringToFront = FALSE
+              )) %>%
+  addCircleMarkers(
+    data = remove_incorrect_state_zip,
+    lat = ~lat,
+    lng = ~lng,
+    radius = ~sqrt(zip_count) * 1.5,
+    color = "#e34a33",
+    weight = 0.4,
+    fillColor = "#fc8d62",
+    fillOpacity = 0.1,
+    
+    popup = ~paste("Zip Code:", zip_code, "<br/>", "Count:", zip_count)
+  ) %>%
+  addLayersControl(
+    overlayGroups = c("Counties", "Cities"),
+    options = layersControlOptions(collapsed = FALSE)
+  ) %>%
+  hideGroup(c("Counties", "Cities"))
+  
+``` 
+## Understanding Counties
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+remove_incorrect_state_zip %>%
+  group_by(zip_code, major_city) %>%
+  mutate(num = n()) %>%
+  select(zip_code, country_code, county, major_city, num) %>%
+  arrange(zip_code) %>%
+  kable(col.names = c("Zip Code", "Country", "County", "Major City", "Number of Respondents"))
+```
+
+## Age of Respondents
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+remove_incorrect_state_zip$age <- factor(remove_incorrect_state_zip$age, levels = c("Under 18 years", "18 to 24 years", "25 to 34 years", "35 to 44 years", "45 to 54 years", "55 to 64 years", "65 or older", "Decline to answer"))
+
+new_labels <- c("Under 18", "18-24", "25-34", "35-44", "45-54", "55-64", "65+", "Declined")
+
+remove_incorrect_state_zip %>%
+  group_by(age, survey) %>%
+  summarize(count = n()) %>%
+  ggplot(aes(x = age, y = count, fill = survey)) + 
+  geom_bar(stat = "identity", position = position_dodge()) + geom_text(aes(label = count), vjust = 1.5, position = position_dodge(0.9), size = 2) +
+  labs(x = "Age Group", y = "Count", title = "Number of Visitors by Age", fill = "Survey") +   theme(axis.text.x = element_text(angle = 45, hjust = 1)) + scale_x_discrete(labels = new_labels) + scale_color_manual(name = "Survey")
+```
+
+#### Age of Respondents, Population Pyramid
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+remove_incorrect_state_zip %>%
+  group_by(age, survey) %>%
+  summarize(count = n()) %>%
+  mutate(pyramid = ifelse(survey=="Post Season", count*(1), count*(-1))) %>%
+  ggplot(aes(x = age, y = pyramid, fill = survey)) +
+  geom_bar(stat = "identity") + coord_flip() + geom_text(aes(label = count), size = 2) + scale_fill_brewer(type = "seq", palette = 3) + theme(axis.text.x = element_blank(), axis.ticks.x = element_blank()) + ylab("Frequency") + xlab("Age Group") + labs(fill = "Survey")
+```
+
+#### Ethnicity of Respondents, Mult-Choice ONLY, by Survey
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+remove_incorrect_state_zip %>%
+  group_by(race_ethnicity, survey) %>%
+  summarize(ethnic_count = n()) %>%
+  kable(col.names = c("Race/Ethnicity", "Survey", "Number of Respondents"))
+```
+
+#### Ethnicity of Respondents, Other Including, by Survey
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+remove_incorrect_state_zip %>%
+  group_by(race_ethnicity,other_race_ethnicity, survey) %>%
+  summarize(ethnic_count = n()) %>%
+  kable(col.names = c("Race/Ethnicity", "Other Race/Ethnicity", "Survey", "Number of Respondents"))
+```
+
+#### Ethnicity of Respondents, Multi-ONLY, ALL
+```{r, echo=FALSE, warning= FALSE, message= FALSE}
+remove_incorrect_state_zip %>%
+  group_by(race_ethnicity) %>%
+  summarize(ethnic_count = n()) %>%
+  kable(col.names = c("Race/Ethnicity", "Number of Respondents"))
+```
